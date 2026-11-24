@@ -5,22 +5,44 @@ on:
     branches: [windows-build]
   workflow_dispatch:
 
+# Token só lê o repositório; nenhum job publica nada além do artefato.
+permissions:
+  contents: read
+
 jobs:
+  # Vulnerabilidades conhecidas (RustSec) e fontes de dependência fora do crates.io.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2
+        with:
+          command: check advisories sources
+
   build:
     runs-on: windows-latest
     env:
       # CRT estática: o .exe roda sem o Visual C++ Redistributable instalado.
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Toolchain (rust-toolchain.toml)
         shell: bash
         run: rustup show && rustc --version
-      - uses: Swatinem/rust-cache@v2
-      - name: Compilar exemplo demo
-        run: cargo build --release --example demo --target x86_64-pc-windows-msvc
-      - uses: actions/upload-artifact@v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Compilar exemplo demo (Cargo.lock travado)
+        run: cargo build --locked --release --example demo --target x86_64-pc-windows-msvc
+      - name: SHA-256 do binário
+        shell: pwsh
+        run: (Get-FileHash target/x86_64-pc-windows-msvc/release/examples/demo.exe -Algorithm SHA256).Hash | Tee-Object target/x86_64-pc-windows-msvc/release/examples/demo.exe.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: whatsapp-demo-windows-x64
-          path: target/x86_64-pc-windows-msvc/release/examples/demo.exe
+          path: |
+            target/x86_64-pc-windows-msvc/release/examples/demo.exe
+            target/x86_64-pc-windows-msvc/release/examples/demo.exe.sha256
           if-no-files-found: error
