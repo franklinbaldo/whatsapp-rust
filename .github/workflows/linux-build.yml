@@ -1,0 +1,41 @@
+name: linux-build
+
+on:
+  push:
+    branches: [windows-build]
+  workflow_dispatch:
+
+# Token só lê o repositório; o job publica apenas artefatos do próprio run.
+permissions:
+  contents: read
+
+jobs:
+  # Binário musl estático + imagem scratch, ambos a partir do Dockerfile do
+  # repositório (Alpine/musl), compilando o código deste fork. Destino: Jatobá
+  # (Container-Optimized OS, x86_64), que só roda contêineres.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Construir imagem (estágio final e builder)
+        run: |
+          docker build --target builder -t wa-builder .
+          docker build -t whatsapp-rust-fork:${GITHUB_SHA::8} -t whatsapp-rust-fork:latest .
+      - name: Extrair binário estático
+        run: |
+          mkdir -p out
+          docker run --rm --entrypoint cat wa-builder /app/whatsapp-rust-bin > out/whatsapp-rust-demo-linux-x64-musl
+          chmod +x out/whatsapp-rust-demo-linux-x64-musl
+          file out/whatsapp-rust-demo-linux-x64-musl
+      - name: Exportar imagem
+        run: docker save whatsapp-rust-fork:${GITHUB_SHA::8} whatsapp-rust-fork:latest | gzip -9 > out/whatsapp-rust-fork-image.tar.gz
+      - name: SHA-256
+        working-directory: out
+        run: sha256sum * | tee SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: whatsapp-demo-linux-x64
+          path: out/
+          if-no-files-found: error
