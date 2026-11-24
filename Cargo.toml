@@ -230,6 +230,8 @@ tokio-runtime = ["dep:tokio"]
 signal = ["tokio-runtime", "tokio/signal"]
 sqlite-storage = ["whatsapp-rust-sqlite-storage"]
 sqlite-storage-bundled = ["sqlite-storage", "whatsapp-rust-sqlite-storage/bundled-sqlite"]
+# Fork: banco do demo criptografado (SQLCipher); a chave fica protegida pela DPAPI no Windows.
+sqlite-storage-sqlcipher = ["sqlite-storage", "whatsapp-rust-sqlite-storage/bundled-sqlcipher"]
 tokio-native = ["tokio-runtime", "tokio/rt-multi-thread"]
 # The portable half of the VoIP runtime: call signaling, the facade, and the orchestration around
 # `wacore`'s sans-IO engine. It owns no socket and names no clock, so it builds wherever `wacore`
@@ -342,6 +344,11 @@ getrandom = { workspace = true, features = ["wasm_js"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 send_wrapper = { version = "0.6", features = ["futures"] }
+
+# Fork: DPAPI e chave aleatória para o demo com SQLCipher.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+getrandom = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 parking_lot = "=0.13.0"

@@ -66,7 +66,11 @@ fn main() {
         .expect("Failed to build tokio runtime");
 
     rt.block_on(async {
-        let store = match SqliteStore::open("whatsapp.db").await {
+        #[cfg(not(feature = "sqlite-storage-sqlcipher"))]
+        let opened = SqliteStore::open("whatsapp.db").await;
+        #[cfg(feature = "sqlite-storage-sqlcipher")]
+        let opened = db_key::open_encrypted("whatsapp.db").await;
+        let store = match opened {
             Ok(store) => store,
             Err(e) => {
                 error!("Failed to create SQLite backend: {}", e);
@@ -359,5 +363,126 @@ mod tests {
             memreport_interval_from_raw(Some("not-a-number")),
             Some(Duration::from_secs(DEFAULT_MEMREPORT_INTERVAL_SECS))
         );
+    }
+}
+
+/// Fork: banco SQLCipher com a chave protegida pela DPAPI do Windows.
+///
+/// O banco guarda as chaves Signal e a sessão inteira da conta; em texto puro,
+/// copiar o arquivo equivale a clonar o aparelho conectado. A chave (32 bytes
+/// aleatórios) fica em `<banco>.key`, cifrada pela DPAPI, que a amarra ao login
+/// do Windows: o par banco + chave copiado para outro usuário ou outra máquina
+/// não abre, e o uso diário dispensa senha.
+#[cfg(feature = "sqlite-storage-sqlcipher")]
+mod db_key {
+    use whatsapp_rust::store::{SqliteDatabase, SqliteDatabaseConfig, SqliteStore};
+
+    type BoxErr = Box<dyn std::error::Error + Send + Sync>;
+
+    pub async fn open_encrypted(db_path: &str) -> Result<SqliteStore, BoxErr> {
+        let key_hex = load_or_create_key(db_path)?;
+        let config = SqliteDatabaseConfig::default().with_connection_init(move |conn| {
+            use diesel::RunQueryDsl;
+            // Chave bruta (x'..'): dispensa a derivação PBKDF2, pois já é aleatória.
+            diesel::sql_query(format!("PRAGMA key = \"x'{key_hex}'\";")).execute(conn)?;
+            // Falha aqui se a chave não for a deste banco.
+            diesel::sql_query("SELECT count(*) FROM sqlite_master;").execute(conn)?;
+            Ok(())
+        });
+        Ok(SqliteDatabase::open(db_path, config).await?.store(1))
+    }
+
+    #[cfg(windows)]
+    fn load_or_create_key(db_path: &str) -> Result<String, BoxErr> {
+        use std::path::Path;
+        let key_path = format!("{db_path}.key");
+        let key = if Path::new(&key_path).exists() {
+            let key = dpapi::unprotect(&std::fs::read(&key_path)?)?;
+            if key.len() != 32 {
+                return Err(format!("{key_path}: chave com tamanho inesperado").into());
+            }
+            key
+        } else {
+            if Path::new(db_path).exists() {
+                return Err(format!(
+                    "{db_path} existe sem {key_path}: banco antigo sem criptografia \
+                     ou chave perdida. Apague {db_path} e pareie de novo."
+                )
+                .into());
+            }
+            let mut key = vec![0u8; 32];
+            getrandom::fill(&mut key).map_err(|e| format!("getrandom: {e}"))?;
+            std::fs::write(&key_path, dpapi::protect(&key)?)?;
+            key
+        };
+        Ok(key.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    #[cfg(not(windows))]
+    fn load_or_create_key(_db_path: &str) -> Result<String, BoxErr> {
+        Err("sqlite-storage-sqlcipher: a guarda da chave por DPAPI só existe no Windows".into())
+    }
+
+    #[cfg(windows)]
+    mod dpapi {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Cryptography::{
+            CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+        };
+
+        use super::BoxErr;
+
+        pub fn protect(data: &[u8]) -> Result<Vec<u8>, BoxErr> {
+            run(data, true)
+        }
+
+        pub fn unprotect(data: &[u8]) -> Result<Vec<u8>, BoxErr> {
+            run(data, false)
+        }
+
+        fn run(input: &[u8], protect: bool) -> Result<Vec<u8>, BoxErr> {
+            let data_in = CRYPT_INTEGER_BLOB {
+                cbData: u32::try_from(input.len())?,
+                pbData: input.as_ptr().cast_mut(),
+            };
+            let mut out = CRYPT_INTEGER_BLOB {
+                cbData: 0,
+                pbData: std::ptr::null_mut(),
+            };
+            // SAFETY: ponteiros válidos durante a chamada; a saída é alocada pela
+            // DPAPI e liberada com LocalFree logo após a cópia.
+            let ok = unsafe {
+                if protect {
+                    CryptProtectData(
+                        &data_in,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        CRYPTPROTECT_UI_FORBIDDEN,
+                        &mut out,
+                    )
+                } else {
+                    CryptUnprotectData(
+                        &data_in,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        CRYPTPROTECT_UI_FORBIDDEN,
+                        &mut out,
+                    )
+                }
+            };
+            if ok == 0 {
+                return Err(format!("DPAPI falhou: {}", std::io::Error::last_os_error()).into());
+            }
+            // SAFETY: a DPAPI devolveu `cbData` bytes válidos em `pbData`.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
+            // SAFETY: memória alocada pela DPAPI com LocalAlloc.
+            unsafe { LocalFree(out.pbData.cast()) };
+            Ok(bytes)
+        }
     }
 }

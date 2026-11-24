@@ -34,8 +34,12 @@ jobs:
         shell: bash
         run: rustup show && rustc --version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Compilar exemplo demo (Cargo.lock travado)
-        run: cargo build --locked --release --example demo --target x86_64-pc-windows-msvc
+      # 1a rodada com SQLCipher: o lock ganha openssl-src/openssl-sys; depois volta a --locked.
+      - name: Compilar exemplo demo com SQLCipher
+        run: cargo build --release -p whatsapp-rust --example demo --target x86_64-pc-windows-msvc --no-default-features --features "sqlite-storage-sqlcipher,tokio-transport,tokio-runtime,ureq-client,tokio-native,signal"
+      - name: Pacotes novos no Cargo.lock
+        shell: bash
+        run: git diff --stat Cargo.lock; git diff Cargo.lock | grep -E '^\+(name|version|source)' || true
       - name: SHA-256 do binário
         shell: pwsh
         run: (Get-FileHash target/x86_64-pc-windows-msvc/release/examples/demo.exe -Algorithm SHA256).Hash | Tee-Object target/x86_64-pc-windows-msvc/release/examples/demo.exe.sha256
@@ -45,4 +49,5 @@ jobs:
           path: |
             target/x86_64-pc-windows-msvc/release/examples/demo.exe
             target/x86_64-pc-windows-msvc/release/examples/demo.exe.sha256
+            Cargo.lock
           if-no-files-found: error

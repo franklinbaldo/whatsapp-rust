@@ -20,6 +20,9 @@ mobile = ["wacore/mobile"]
 instance-clock = ["wacore/instance-clock"]
 default = ["bundled-sqlite"]
 bundled-sqlite = ["libsqlite3-sys/bundled"]
+# Fork: SQLCipher (banco criptografado) compilado com OpenSSL embutido.
+# Exclusivo com bundled-sqlite: desligue as default features ao usar.
+bundled-sqlcipher = ["libsqlite3-sys/bundled-sqlcipher-vendored-openssl"]
 test-util = []
 # The browser host on wasm32-unknown-unknown: wacore's JS randomness and
 # sqlite-wasm-rs's wasm-bindgen hooks, which the 0.6 ABI Diesel accepts no
