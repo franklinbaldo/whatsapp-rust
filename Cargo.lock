@@ -6757,6 +6757,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zap"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "diesel",
+ "env_logger",
+ "log",
+ "serde_json",
+ "tokio",
+ "wacore",
+ "waproto",
+ "whatsapp-rust",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
