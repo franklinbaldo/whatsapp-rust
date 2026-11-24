@@ -1,0 +1,26 @@
+name: windows-build
+
+on:
+  push:
+    branches: [windows-build]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # CRT estática: o .exe roda sem o Visual C++ Redistributable instalado.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml)
+        shell: bash
+        run: rustup show && rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Compilar exemplo demo
+        run: cargo build --release --example demo --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whatsapp-demo-windows-x64
+          path: target/x86_64-pc-windows-msvc/release/examples/demo.exe
+          if-no-files-found: error
