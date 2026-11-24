@@ -110,6 +110,11 @@ fn main() {
                 error!("❌ Bot was logged out!");
             })
             .on_message(|ctx| async move {
+                // Fork: só obedece a comandos enviados pela própria conta. Sem isso,
+                // qualquer contato faria a conta enviar mensagens via `🦀send`.
+                if !ctx.info.source.is_from_me {
+                    return;
+                }
                 if let Some(reply) = build_media_pong(&ctx.message) {
                     info!("Received media ping from {}", ctx.info.source.sender);
                     if let Err(e) = ctx.send_message(reply).await {
