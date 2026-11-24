@@ -21,6 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [workspace]
 members = [
     ".",
+    "apps/zap",
     "examples/voip-cli",
     "http_clients/ureq-client",
     "plugins/metrics",

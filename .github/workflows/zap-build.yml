@@ -1,0 +1,54 @@
+name: zap-build
+
+on:
+  push:
+    branches: [zap]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Erros de compilação rápidos (com cache), antes do build lento da imagem.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          cache-on-failure: true
+      - name: clippy -p zap
+        run: cargo clippy -p zap -- -D warnings
+      - name: Cargo.lock atualizado (novo crate)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cargo-lock
+          path: Cargo.lock
+
+  # Binário musl estático + imagem scratch, para o Jatobá.
+  image:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Construir imagem
+        run: |
+          docker build -f apps/zap/Dockerfile --target builder -t zap-builder .
+          docker build -f apps/zap/Dockerfile -t zap:${GITHUB_SHA::8} -t zap:latest .
+      - name: Exportar binário e imagem
+        run: |
+          mkdir -p out
+          docker run --rm --entrypoint cat zap-builder /app/zap-bin > out/zap-linux-x64-musl
+          chmod +x out/zap-linux-x64-musl
+          docker save zap:${GITHUB_SHA::8} zap:latest | gzip -9 > out/zap-image.tar.gz
+          cd out && sha256sum * | tee SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zap-linux-x64
+          path: out/
+          if-no-files-found: error

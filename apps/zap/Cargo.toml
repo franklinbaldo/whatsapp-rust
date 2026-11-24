@@ -1,0 +1,31 @@
+# zap: arquivo completo da conta. Serviço que mantém a sessão conectada e grava
+# todos os eventos (mensagens, histórico, recibos, contatos, grupos, chamadas...)
+# num SQLite próprio, mais uma CLI de consulta sobre esse banco.
+# Membro do workspace, fora dos default-members: `cargo build -p zap`.
+[package]
+name = "zap"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "zap"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+async-trait = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+diesel = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["full"] }
+wacore = { workspace = true }
+waproto = { path = "../../waproto" }
+whatsapp-rust = { path = "../.." }
+
+[lints]
+workspace = true
