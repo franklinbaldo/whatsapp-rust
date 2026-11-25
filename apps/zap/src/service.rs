@@ -257,7 +257,7 @@ async fn send_one(client: &Arc<Client>, item: &OutboxItem) -> SendOutcome {
             SendOutcome::Sent {
                 to,
                 message_id,
-                row,
+                row: Box::new(row),
             }
         }
         Err(e) => {

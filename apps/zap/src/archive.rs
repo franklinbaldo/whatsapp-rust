@@ -92,7 +92,7 @@ pub enum SendOutcome {
     Sent {
         to: String,
         message_id: String,
-        row: MessageRow,
+        row: Box<MessageRow>,
     },
     Failed {
         error: String,
@@ -285,7 +285,7 @@ impl Archive {
             })
             .await?;
         if let Some(row) = sent_row {
-            self.insert_messages(vec![row]).await?;
+            self.insert_messages(vec![*row]).await?;
         }
         Ok(())
     }
