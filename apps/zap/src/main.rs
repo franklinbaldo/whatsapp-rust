@@ -5,6 +5,7 @@
 //!   zap chats [-n 30]             conversas, da mais recente para a mais antiga
 //!   zap chat <jid|nome> [-n 50]   mensagens de uma conversa
 //!   zap search <texto> [-n 50]    busca textual
+//!   zap link <número|nome> <texto> link wa.me com a mensagem pronta (não envia)
 //!   zap stats                     contagens do arquivo
 //!   zap events [--kind K] [-n 20] eventos brutos (JSON)
 //!
@@ -70,6 +71,15 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: i64,
     },
+    /// Link wa.me com a mensagem pronta; o envio é manual, pelo app oficial.
+    #[command(alias = "send")]
+    Link {
+        /// Número (5569...) ou parte do nome de um contato.
+        to: String,
+        /// Texto da mensagem.
+        #[arg(required = true, trailing_var_arg = true)]
+        text: Vec<String>,
+    },
     /// Contagens do arquivo.
     Stats,
     /// Eventos brutos, em JSON.
@@ -115,6 +125,7 @@ fn main() -> Result<()> {
                 Cmd::Chats { limit } => cli::chats(&archive, limit),
                 Cmd::Chat { who, limit } => cli::chat(&archive, &who, limit),
                 Cmd::Search { query, limit } => cli::search(&archive, &query, limit),
+                Cmd::Link { to, text } => cli::link(&archive, &to, &text.join(" ")),
                 Cmd::Stats => cli::stats(&archive),
                 Cmd::Events { kind, limit } => cli::events(&archive, kind.as_deref(), limit),
                 Cmd::Run { .. } => unreachable!(),

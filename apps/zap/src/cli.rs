@@ -1,11 +1,19 @@
 //! Consultas sobre o arquivo. Abrem o mesmo `archive.db` que o serviço está
 //! gravando; o modo WAL permite ler enquanto ele escreve.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Nullable, Text};
 
 use crate::archive::Archive;
+
+#[derive(QueryableByName)]
+struct ContactRow {
+    #[diesel(sql_type = Text)]
+    chat: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    name: Option<String>,
+}
 
 #[derive(QueryableByName)]
 struct ChatRow {
@@ -177,6 +185,75 @@ pub fn stats(archive: &Archive) -> Result<()> {
     for r in kinds {
         println!("{:>8}  {}", r.total, r.label);
     }
+    Ok(())
+}
+
+/// Codifica `s` para a query string de um link (RFC 3986, byte a byte).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Número de telefone (só dígitos) e nome do contato. Aceita o número
+/// (com ou sem `+`, espaços e traços) ou parte do nome de uma conversa
+/// individual já arquivada.
+fn resolve_contact(c: &mut SqliteConnection, who: &str) -> Result<(String, Option<String>)> {
+    let digits: String = who.chars().filter(char::is_ascii_digit).collect();
+    if !digits.is_empty()
+        && who
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || "+-() ".contains(ch))
+    {
+        return Ok((digits, None));
+    }
+    let rows: Vec<ContactRow> = diesel::sql_query(
+        "SELECT m.chat AS chat, \
+                COALESCE(c.name, MAX(CASE WHEN m.from_me = 0 THEN m.push_name END)) AS name \
+         FROM messages m LEFT JOIN chats c ON c.jid = m.chat \
+         WHERE m.chat LIKE '%@s.whatsapp.net' \
+           AND (c.name LIKE ?1 OR (m.from_me = 0 AND m.push_name LIKE ?1)) \
+         GROUP BY m.chat ORDER BY MAX(m.ts) DESC LIMIT 10",
+    )
+    .bind::<Text, _>(format!("%{who}%"))
+    .load(c)?;
+    match rows.as_slice() {
+        [] => Err(anyhow!(
+            "nenhum contato com número encontrado para '{who}'; passe o número (ex.: 5569...)"
+        )),
+        [one] => {
+            let number = one.chat.split('@').next().unwrap_or_default().to_string();
+            Ok((number, one.name.clone()))
+        }
+        many => {
+            let list = many
+                .iter()
+                .map(|r| format!("  {}  {}", r.chat, r.name.as_deref().unwrap_or("")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(anyhow!("'{who}' é ambíguo, escolha pelo número:\n{list}"))
+        }
+    }
+}
+
+/// Imprime um link `wa.me` que abre a conversa no app oficial com o texto
+/// pronto. O zap não envia nada: quem envia é o dono, tocando no link que
+/// recebe por um canal próprio (o agente, por exemplo).
+pub fn link(archive: &Archive, to: &str, text: &str) -> Result<()> {
+    let mut c = archive.conn()?;
+    let (number, name) = resolve_contact(&mut c, to)?;
+    let label = match &name {
+        Some(n) => format!("{n} (+{number})"),
+        None => format!("+{number}"),
+    };
+    println!("para: {label}");
+    println!("https://wa.me/{number}?text={}", percent_encode(text));
     Ok(())
 }
 
