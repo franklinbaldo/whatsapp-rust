@@ -6,8 +6,11 @@
 //! - Histórico: cada bloco é gravado cru antes do recibo `hist_sync`, e depois
 //!   projetado em `messages`/`chats` quando o evento `HistorySync` chega.
 //! - Todo o resto: cada evento vira uma linha JSON em `events`.
+//! - Envio: `zap send` grava na tabela `outbox`; este serviço, dono da
+//!   sessão, envia e arquiva a mensagem enviada (`origin = 'sent'`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use log::{error, info, warn};
@@ -16,7 +19,9 @@ use whatsapp_rust::pair_code::PairCodeOptions;
 use whatsapp_rust::prelude::*;
 use whatsapp_rust::{HistorySyncCaptureHook, InboundDurabilityHook};
 
-use crate::archive::{Archive, MessageRow, field, field_i64, field_str, kind_and_text};
+use crate::archive::{
+    Archive, MessageRow, OutboxItem, SendOutcome, field, field_i64, field_str, kind_and_text,
+};
 
 pub struct RunOptions {
     pub session_db: String,
@@ -163,6 +168,135 @@ async fn project_history(
     Ok(())
 }
 
+const MAX_SEND_ATTEMPTS: i32 = 5;
+
+/// Variantes de um número brasileiro de celular, com e sem o nono dígito:
+/// contas antigas seguem registradas sem ele.
+fn phone_candidates(digits: &str) -> Vec<String> {
+    let mut out = vec![digits.to_string()];
+    if digits.starts_with("55") {
+        if digits.len() == 13 && digits.as_bytes()[4] == b'9' {
+            out.push(format!("{}{}", &digits[..4], &digits[5..]));
+        } else if digits.len() == 12 {
+            out.push(format!("{}9{}", &digits[..4], &digits[4..]));
+        }
+    }
+    out
+}
+
+/// Resolve o destinatário da fila. `Err((motivo, desistir))`.
+async fn resolve_recipient(client: &Client, recipient: &str) -> Result<Jid, (String, bool)> {
+    if recipient == "me" {
+        return client
+            .pn()
+            .map(|j| j.to_non_ad())
+            .ok_or_else(|| ("sessão sem número próprio (não pareada?)".to_string(), true));
+    }
+    if recipient.contains('@') {
+        return recipient
+            .parse()
+            .map_err(|e| (format!("JID inválido '{recipient}': {e}"), true));
+    }
+    if recipient.is_empty() || !recipient.chars().all(|c| c.is_ascii_digit()) {
+        return Err((format!("destinatário inválido '{recipient}'"), true));
+    }
+    let jids: Vec<Jid> = phone_candidates(recipient)
+        .into_iter()
+        .map(Jid::pn)
+        .collect();
+    let results = client
+        .contacts()
+        .is_on_whatsapp(&jids)
+        .await
+        .map_err(|e| (format!("consultando o número: {e}"), false))?;
+    results
+        .into_iter()
+        .find(|r| r.is_registered)
+        .map(|r| r.jid.to_non_ad())
+        .ok_or_else(|| (format!("+{recipient} não tem WhatsApp"), true))
+}
+
+async fn send_one(client: &Arc<Client>, item: &OutboxItem) -> SendOutcome {
+    let last_try = item.attempts + 1 >= MAX_SEND_ATTEMPTS;
+    let jid = match resolve_recipient(client, &item.recipient).await {
+        Ok(jid) => jid,
+        Err((error, give_up)) => {
+            warn!("envio #{}: {error}", item.id);
+            return SendOutcome::Failed {
+                error,
+                give_up: give_up || last_try,
+            };
+        }
+    };
+    match client
+        .send_message(jid, wa::Message::text(item.text.as_str()))
+        .await
+    {
+        Ok(sent) => {
+            let to = sent.to.to_string();
+            let message_id = sent.message_id.to_string();
+            info!("enviada {message_id} para {to} (fila #{})", item.id);
+            let row = MessageRow {
+                chat: to.clone(),
+                id: message_id.clone(),
+                sender: client.pn().map(|j| j.to_non_ad().to_string()),
+                from_me: true,
+                ts: Some(wacore::time::now_millis() / 1000),
+                push_name: None,
+                kind: Some("conversation".to_string()),
+                text: Some(item.text.clone()),
+                origin: "sent",
+                json: serde_json::json!({
+                    "outbox_id": item.id,
+                    "to": to,
+                    "message_id": message_id,
+                })
+                .to_string(),
+                proto: Some(waproto::codec::message_to_vec(&sent.message)),
+            };
+            SendOutcome::Sent {
+                to,
+                message_id,
+                row,
+            }
+        }
+        Err(e) => {
+            warn!(
+                "envio #{} falhou (tentativa {}): {e}",
+                item.id,
+                item.attempts + 1
+            );
+            SendOutcome::Failed {
+                error: e.to_string(),
+                give_up: last_try,
+            }
+        }
+    }
+}
+
+/// Esvazia a fila `outbox` enquanto a sessão estiver ativa.
+async fn outbox_loop(archive: Archive, client: Arc<Client>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if !client.is_logged_in() {
+            continue;
+        }
+        let items = match archive.pending_outbox().await {
+            Ok(items) => items,
+            Err(e) => {
+                error!("lendo fila de envio: {e:#}");
+                continue;
+            }
+        };
+        for item in items {
+            let outcome = send_one(&client, &item).await;
+            if let Err(e) = archive.finish_outbox(item.id, outcome).await {
+                error!("registrando envio #{}: {e:#}", item.id);
+            }
+        }
+    }
+}
+
 async fn record_event(archive: &Archive, event: &Event) -> Result<()> {
     match event {
         // Já gravadas pelo gancho de durabilidade. Newsletters e mensagens
@@ -248,6 +382,7 @@ pub async fn run(opts: RunOptions) -> Result<()> {
         .await
         .map_err(|e| anyhow!("criando cliente: {e}"))?;
     let mut handle = bot.spawn();
+    tokio::spawn(outbox_loop(archive, handle.client()));
     tokio::select! {
         _ = &mut handle => {}
         _ = shutdown_signal() => {

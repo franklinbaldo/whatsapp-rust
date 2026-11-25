@@ -57,7 +57,48 @@ CREATE TABLE IF NOT EXISTS chats (
     name       TEXT,
     updated_at INTEGER NOT NULL
 );
+
+-- Fila de envio: a CLI grava, o serviço (dono da sessão) envia.
+CREATE TABLE IF NOT EXISTS outbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  INTEGER NOT NULL,
+    recipient   TEXT    NOT NULL,
+    text        TEXT    NOT NULL,
+    status      TEXT    NOT NULL DEFAULT 'pending',
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    sent_at     INTEGER,
+    sent_to     TEXT,
+    message_id  TEXT,
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS outbox_status ON outbox (status, id);
 "#;
+
+/// Um envio pendente na fila.
+#[derive(QueryableByName)]
+pub struct OutboxItem {
+    #[diesel(sql_type = BigInt)]
+    pub id: i64,
+    #[diesel(sql_type = Text)]
+    pub recipient: String,
+    #[diesel(sql_type = Text)]
+    pub text: String,
+    #[diesel(sql_type = Integer)]
+    pub attempts: i32,
+}
+
+/// Desfecho de uma tentativa de envio.
+pub enum SendOutcome {
+    Sent {
+        to: String,
+        message_id: String,
+        row: MessageRow,
+    },
+    Failed {
+        error: String,
+        give_up: bool,
+    },
+}
 
 /// Busca textual. Separada do schema principal: se o SQLite não tiver FTS5,
 /// o arquivo continua funcionando e a busca cai para LIKE.
@@ -196,6 +237,57 @@ impl Archive {
             })
         })
         .await
+    }
+
+    pub async fn pending_outbox(&self) -> Result<Vec<OutboxItem>> {
+        self.with_conn(|c| {
+            Ok(diesel::sql_query(
+                "SELECT id, recipient, text, attempts FROM outbox \
+                 WHERE status = 'pending' ORDER BY id LIMIT 20",
+            )
+            .load(c)?)
+        })
+        .await
+    }
+
+    /// Registra o desfecho de um envio; se enviado, arquiva a mensagem.
+    pub async fn finish_outbox(&self, id: i64, outcome: SendOutcome) -> Result<()> {
+        let now = wacore::time::now_millis();
+        let sent_row = self
+            .with_conn(move |c| match outcome {
+                SendOutcome::Sent {
+                    to,
+                    message_id,
+                    row,
+                } => {
+                    diesel::sql_query(
+                        "UPDATE outbox SET status = 'sent', attempts = attempts + 1, \
+                         sent_at = ?, sent_to = ?, message_id = ?, error = NULL WHERE id = ?",
+                    )
+                    .bind::<BigInt, _>(now)
+                    .bind::<Text, _>(to)
+                    .bind::<Text, _>(message_id)
+                    .bind::<BigInt, _>(id)
+                    .execute(c)?;
+                    Ok(Some(row))
+                }
+                SendOutcome::Failed { error, give_up } => {
+                    diesel::sql_query(
+                        "UPDATE outbox SET attempts = attempts + 1, error = ?, \
+                         status = CASE WHEN ? THEN 'failed' ELSE 'pending' END WHERE id = ?",
+                    )
+                    .bind::<Text, _>(error)
+                    .bind::<Integer, _>(i32::from(give_up))
+                    .bind::<BigInt, _>(id)
+                    .execute(c)?;
+                    Ok(None)
+                }
+            })
+            .await?;
+        if let Some(row) = sent_row {
+            self.insert_messages(vec![row]).await?;
+        }
+        Ok(())
     }
 
     pub async fn upsert_chats(&self, chats: Vec<(String, Option<String>)>) -> Result<()> {
